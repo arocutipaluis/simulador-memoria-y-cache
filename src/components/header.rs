@@ -1,11 +1,12 @@
 use yew::prelude::*;
 
 use crate::components::icons::{BookIcon, ChartIcon, CompareIcon, CpuIcon, FlaskIcon, TrophyIcon};
-use crate::sim::types::SimMode;
+use crate::sim::types::{CacheConfig, SimMode};
 
 #[derive(Properties, PartialEq)]
 pub struct HeaderProps {
     pub active_mode: SimMode,
+    pub config: CacheConfig,
     pub score_xp: u32,
     pub on_select_mode: Callback<SimMode>,
     pub on_open_eval: Callback<()>,
@@ -20,6 +21,8 @@ pub fn header(props: &HeaderProps) -> Html {
         (SimMode::Compare, "Comparador A/B", html! { <CompareIcon /> }),
     ];
 
+    let cfg = props.config;
+
     html! {
         <header class="cockpit-header">
             <div class="header-inner">
@@ -27,12 +30,18 @@ pub fn header(props: &HeaderProps) -> Html {
                     <div class="brand-mark">
                         <CpuIcon />
                     </div>
-                    <div>
-                        <h1 class="brand-title">
-                            {"CacheLab Cockpit"}
-                            <span class="version-pill">{"RUST/YEW WASM v3.0"}</span>
-                        </h1>
-                        <p class="brand-sub">{"Simulador de Jerarquia de Memoria, Mapeo y Politicas de Cache"}</p>
+                    <div class="brand-copy">
+                        <h1 class="brand-title">{"CacheLab Cockpit"}</h1>
+                        <span class="brand-meta mono">
+                            {format!(
+                                "{} {}x{} ({}B) · {}",
+                                cfg.mapping.label(),
+                                cfg.num_blocks,
+                                cfg.block_size,
+                                cfg.capacity_bytes(),
+                                cfg.write_policy.label()
+                            )}
+                        </span>
                     </div>
                 </div>
 
@@ -44,6 +53,7 @@ pub fn header(props: &HeaderProps) -> Html {
                         html! {
                             <button
                                 class={classes!("mode-btn", is_active.then_some("active"))}
+                                aria-pressed={is_active.to_string()}
                                 {onclick}
                                 type="button"
                             >
@@ -55,11 +65,9 @@ pub fn header(props: &HeaderProps) -> Html {
                 </nav>
 
                 <div class="header-actions">
-                    <div class="xp-pill">
-                        <div>
-                            <div class="xp-label">{"XP"}</div>
-                            <div class="xp-value mono">{format!("{} XP", props.score_xp)}</div>
-                        </div>
+                    <div class="xp-pill" title="Experiencia acumulada en hits y retos">
+                        <span class="xp-label">{"XP"}</span>
+                        <span class="xp-value mono">{props.score_xp}</span>
                     </div>
                     <button
                         class="btn btn-sm"

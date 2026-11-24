@@ -2,6 +2,7 @@ use gloo_timers::callback::Interval;
 use yew::prelude::*;
 
 use crate::components::address_decoder::AddressDecoder;
+use crate::components::bus_datapath::BusDatapath;
 use crate::components::cache_grid::CacheGrid;
 use crate::components::comparator_view::{parse_trace_line, ComparatorView};
 use crate::components::eval_modal::EvalModal;
@@ -10,6 +11,7 @@ use crate::components::metrics_panel::MetricsPanel;
 use crate::components::mode_banner::ModeBanner;
 use crate::components::ram_view::RamView;
 use crate::components::step_controller::{parse_address_str, StepController};
+use crate::components::{detect_eviction, EvictionNotice};
 use crate::sim::engine::CacheEngine;
 use crate::sim::presets::{challenges, check_challenge_passed, learn_lessons, preset_sequence};
 use crate::sim::types::{
@@ -28,6 +30,7 @@ pub fn app() -> Html {
 
     // Simulador principal
     let engine = use_state(|| CacheEngine::new(CacheConfig::default()));
+    let last_eviction = use_state(|| None::<EvictionNotice>);
     let selected_addr = use_state(|| 0u8);
     let custom_addr_input = use_state(|| "0x00".to_string());
     let addr_error = use_state(|| None::<String>);
@@ -35,9 +38,9 @@ pub fn app() -> Html {
     let queue = use_state(|| preset_sequence(PresetKind::Sequential));
     let queue_cursor = use_state(|| 0usize);
     let is_playing = use_state(|| false);
-    let speed_ms = use_state(|| 420u32);
+    let speed_ms = use_state(|| 480u32);
 
-    // Comparador A/B (modo estricto L1 -> RAM por defecto para aislar L1 como en MARS)
+    // Comparador A/B (modo estricto L1 -> RAM por defecto)
     let engine_a = use_state(|| {
         CacheEngine::new(CacheConfig {
             num_blocks: 8,
@@ -58,13 +61,14 @@ pub fn app() -> Html {
             use_l2_l3: false,
         })
     });
+    let eviction_a = use_state(|| None::<EvictionNotice>);
+    let eviction_b = use_state(|| None::<EvictionNotice>);
     let cmp_trace = use_state(|| preset_sequence(PresetKind::Thrashing));
     let cmp_cursor = use_state(|| 0usize);
     let cmp_playing = use_state(|| false);
     let cmp_custom_text = use_state(|| "0x00, 0x20, 0x01, 0x21, 0x02, 0x22, 0x03, 0x23".to_string());
     let cmp_error = use_state(|| None::<String>);
 
-    // Evaluar retos tras cada operacion en simulador principal
     let eval_challenges = {
         let completed_challenges = completed_challenges.clone();
         let bonus_xp = bonus_xp.clone();
@@ -92,6 +96,7 @@ pub fn app() -> Html {
         let queue = queue.clone();
         let queue_cursor = queue_cursor.clone();
         let engine = engine.clone();
+        let last_eviction = last_eviction.clone();
         let selected_addr = selected_addr.clone();
         let custom_addr_input = custom_addr_input.clone();
         let eval_challenges = eval_challenges.clone();
@@ -108,8 +113,10 @@ pub fn app() -> Html {
                         return;
                     }
                     let instr = &q[cur];
-                    let mut next_eng = (*engine).clone();
+                    let prev_eng = (*engine).clone();
+                    let mut next_eng = prev_eng.clone();
                     next_eng.execute(instr.op.clone(), instr.addr);
+                    last_eviction.set(detect_eviction(&prev_eng, &next_eng));
                     selected_addr.set(instr.addr);
                     custom_addr_input.set(format_hex(instr.addr));
                     eval_challenges.emit(next_eng.clone());
@@ -133,11 +140,13 @@ pub fn app() -> Html {
         let cmp_cursor = cmp_cursor.clone();
         let engine_a = engine_a.clone();
         let engine_b = engine_b.clone();
+        let eviction_a = eviction_a.clone();
+        let eviction_b = eviction_b.clone();
         let active = *cmp_playing;
 
         use_effect_with((active, *cmp_cursor, (*cmp_trace).clone()), move |_| {
             let interval_handle = if active {
-                Some(Interval::new(360, move || {
+                Some(Interval::new(420, move || {
                     let cur = *cmp_cursor;
                     let tr = &*cmp_trace;
                     if cur >= tr.len() {
@@ -145,10 +154,14 @@ pub fn app() -> Html {
                         return;
                     }
                     let instr = &tr[cur];
-                    let mut next_a = (*engine_a).clone();
-                    let mut next_b = (*engine_b).clone();
+                    let prev_a = (*engine_a).clone();
+                    let prev_b = (*engine_b).clone();
+                    let mut next_a = prev_a.clone();
+                    let mut next_b = prev_b.clone();
                     next_a.execute(instr.op.clone(), instr.addr);
                     next_b.execute(instr.op.clone(), instr.addr);
+                    eviction_a.set(detect_eviction(&prev_a, &next_a));
+                    eviction_b.set(detect_eviction(&prev_b, &next_b));
                     engine_a.set(next_a);
                     engine_b.set(next_b);
                     if cur + 1 >= tr.len() {
@@ -200,6 +213,7 @@ pub fn app() -> Html {
 
     let on_execute_single = {
         let engine = engine.clone();
+        let last_eviction = last_eviction.clone();
         let selected_addr = selected_addr.clone();
         let addr_error = addr_error.clone();
         let is_playing = is_playing.clone();
@@ -209,8 +223,10 @@ pub fn app() -> Html {
                 return;
             }
             is_playing.set(false);
-            let mut next_eng = (*engine).clone();
+            let prev_eng = (*engine).clone();
+            let mut next_eng = prev_eng.clone();
             next_eng.execute(op, *selected_addr);
+            last_eviction.set(detect_eviction(&prev_eng, &next_eng));
             eval_challenges.emit(next_eng.clone());
             engine.set(next_eng);
         })
@@ -238,11 +254,13 @@ pub fn app() -> Html {
         let queue_cursor = queue_cursor.clone();
         let is_playing = is_playing.clone();
         let engine = engine.clone();
+        let last_eviction = last_eviction.clone();
         Callback::from(move |kind: PresetKind| {
             is_playing.set(false);
+            last_eviction.set(None);
             let mut next_eng = (*engine).clone();
             next_eng.reset();
-            next_eng.feedback = format!("Preset '{}' cargado en cola. Usa Step o Auto para ejecutar.", kind.label());
+            next_eng.feedback = format!("Preset '{}' cargado. Usa Step o Play para observar los buses.", kind.label());
             engine.set(next_eng);
             queue.set(preset_sequence(kind));
             queue_cursor.set(0);
@@ -253,6 +271,7 @@ pub fn app() -> Html {
         let queue = queue.clone();
         let queue_cursor = queue_cursor.clone();
         let engine = engine.clone();
+        let last_eviction = last_eviction.clone();
         let selected_addr = selected_addr.clone();
         let custom_addr_input = custom_addr_input.clone();
         let eval_challenges = eval_challenges.clone();
@@ -263,8 +282,10 @@ pub fn app() -> Html {
                 return;
             }
             let instr = &q[cur];
-            let mut next_eng = (*engine).clone();
+            let prev_eng = (*engine).clone();
+            let mut next_eng = prev_eng.clone();
             next_eng.execute(instr.op.clone(), instr.addr);
+            last_eviction.set(detect_eviction(&prev_eng, &next_eng));
             selected_addr.set(instr.addr);
             custom_addr_input.set(format_hex(instr.addr));
             eval_challenges.emit(next_eng.clone());
@@ -275,10 +296,12 @@ pub fn app() -> Html {
 
     let on_reset_all = {
         let engine = engine.clone();
+        let last_eviction = last_eviction.clone();
         let queue_cursor = queue_cursor.clone();
         let is_playing = is_playing.clone();
         Callback::from(move |_| {
             is_playing.set(false);
+            last_eviction.set(None);
             let mut next_eng = (*engine).clone();
             next_eng.reset();
             engine.set(next_eng);
@@ -288,10 +311,12 @@ pub fn app() -> Html {
 
     let on_config_change = {
         let engine = engine.clone();
+        let last_eviction = last_eviction.clone();
         let queue_cursor = queue_cursor.clone();
         let is_playing = is_playing.clone();
         Callback::from(move |cfg: CacheConfig| {
             is_playing.set(false);
+            last_eviction.set(None);
             let mut next_eng = (*engine).clone();
             next_eng.reconfigure(cfg);
             engine.set(next_eng);
@@ -301,8 +326,10 @@ pub fn app() -> Html {
 
     let on_page_fault = {
         let engine = engine.clone();
+        let last_eviction = last_eviction.clone();
         let selected_addr = selected_addr.clone();
         Callback::from(move |_| {
+            last_eviction.set(None);
             let mut next_eng = (*engine).clone();
             next_eng.simulate_page_fault(*selected_addr);
             engine.set(next_eng);
@@ -311,14 +338,17 @@ pub fn app() -> Html {
 
     let on_run_lesson_demo = {
         let engine = engine.clone();
+        let last_eviction = last_eviction.clone();
         let learn_step = learn_step.clone();
         let selected_addr = selected_addr.clone();
         let custom_addr_input = custom_addr_input.clone();
         Callback::from(move |_| {
             let lessons = learn_lessons();
             let lesson = &lessons[(*learn_step).min(lessons.len() - 1)];
-            let mut next_eng = (*engine).clone();
+            let prev_eng = (*engine).clone();
+            let mut next_eng = prev_eng.clone();
             next_eng.execute(lesson.demo_op.clone(), lesson.demo_addr);
+            last_eviction.set(detect_eviction(&prev_eng, &next_eng));
             selected_addr.set(lesson.demo_addr);
             custom_addr_input.set(format_hex(lesson.demo_addr));
             engine.set(next_eng);
@@ -327,11 +357,13 @@ pub fn app() -> Html {
 
     let on_setup_challenge = {
         let engine = engine.clone();
+        let last_eviction = last_eviction.clone();
         let queue = queue.clone();
         let queue_cursor = queue_cursor.clone();
         let is_playing = is_playing.clone();
         Callback::from(move |cid: usize| {
             is_playing.set(false);
+            last_eviction.set(None);
             let mut next_eng = (*engine).clone();
             match cid {
                 2 => {
@@ -383,6 +415,7 @@ pub fn app() -> Html {
         <div class="app-shell">
             <Header
                 active_mode={*mode}
+                config={engine.config}
                 score_xp={total_xp}
                 on_select_mode={{
                     let mode = mode.clone();
@@ -434,6 +467,8 @@ pub fn app() -> Html {
                         <ComparatorView
                             engine_a={(*engine_a).clone()}
                             engine_b={(*engine_b).clone()}
+                            eviction_a={(*eviction_a).clone()}
+                            eviction_b={(*eviction_b).clone()}
                             trace={(*cmp_trace).clone()}
                             cursor={*cmp_cursor}
                             is_playing={*cmp_playing}
@@ -441,11 +476,15 @@ pub fn app() -> Html {
                             trace_error={(*cmp_error).clone()}
                             on_config_a={{
                                 let engine_a = engine_a.clone();
+                                let engine_b = engine_b.clone();
+                                let eviction_a = eviction_a.clone();
+                                let eviction_b = eviction_b.clone();
                                 let cmp_cursor = cmp_cursor.clone();
                                 let cmp_playing = cmp_playing.clone();
-                                let engine_b = engine_b.clone();
                                 Callback::from(move |cfg| {
                                     cmp_playing.set(false);
+                                    eviction_a.set(None);
+                                    eviction_b.set(None);
                                     let mut a = (*engine_a).clone();
                                     a.reconfigure(cfg);
                                     let mut b = (*engine_b).clone();
@@ -458,10 +497,14 @@ pub fn app() -> Html {
                             on_config_b={{
                                 let engine_b = engine_b.clone();
                                 let engine_a = engine_a.clone();
+                                let eviction_a = eviction_a.clone();
+                                let eviction_b = eviction_b.clone();
                                 let cmp_cursor = cmp_cursor.clone();
                                 let cmp_playing = cmp_playing.clone();
                                 Callback::from(move |cfg| {
                                     cmp_playing.set(false);
+                                    eviction_a.set(None);
+                                    eviction_b.set(None);
                                     let mut b = (*engine_b).clone();
                                     b.reconfigure(cfg);
                                     let mut a = (*engine_a).clone();
@@ -478,9 +521,13 @@ pub fn app() -> Html {
                                 let cmp_error = cmp_error.clone();
                                 let engine_a = engine_a.clone();
                                 let engine_b = engine_b.clone();
+                                let eviction_a = eviction_a.clone();
+                                let eviction_b = eviction_b.clone();
                                 Callback::from(move |kind: PresetKind| {
                                     cmp_playing.set(false);
                                     cmp_error.set(None);
+                                    eviction_a.set(None);
+                                    eviction_b.set(None);
                                     let mut a = (*engine_a).clone();
                                     let mut b = (*engine_b).clone();
                                     a.reset();
@@ -503,11 +550,15 @@ pub fn app() -> Html {
                                 let cmp_playing = cmp_playing.clone();
                                 let engine_a = engine_a.clone();
                                 let engine_b = engine_b.clone();
+                                let eviction_a = eviction_a.clone();
+                                let eviction_b = eviction_b.clone();
                                 Callback::from(move |_| {
                                     cmp_playing.set(false);
                                     match parse_trace_line(&cmp_custom_text) {
                                         Ok(parsed) => {
                                             cmp_error.set(None);
+                                            eviction_a.set(None);
+                                            eviction_b.set(None);
                                             let mut a = (*engine_a).clone();
                                             let mut b = (*engine_b).clone();
                                             a.reset();
@@ -526,15 +577,21 @@ pub fn app() -> Html {
                                 let cmp_cursor = cmp_cursor.clone();
                                 let engine_a = engine_a.clone();
                                 let engine_b = engine_b.clone();
+                                let eviction_a = eviction_a.clone();
+                                let eviction_b = eviction_b.clone();
                                 Callback::from(move |_| {
                                     let cur = *cmp_cursor;
                                     let tr = &*cmp_trace;
                                     if cur >= tr.len() { return; }
                                     let instr = &tr[cur];
-                                    let mut a = (*engine_a).clone();
-                                    let mut b = (*engine_b).clone();
+                                    let prev_a = (*engine_a).clone();
+                                    let prev_b = (*engine_b).clone();
+                                    let mut a = prev_a.clone();
+                                    let mut b = prev_b.clone();
                                     a.execute(instr.op.clone(), instr.addr);
                                     b.execute(instr.op.clone(), instr.addr);
+                                    eviction_a.set(detect_eviction(&prev_a, &a));
+                                    eviction_b.set(detect_eviction(&prev_b, &b));
                                     engine_a.set(a);
                                     engine_b.set(b);
                                     cmp_cursor.set(cur + 1);
@@ -550,17 +607,23 @@ pub fn app() -> Html {
                                 let cmp_playing = cmp_playing.clone();
                                 let engine_a = engine_a.clone();
                                 let engine_b = engine_b.clone();
+                                let eviction_a = eviction_a.clone();
+                                let eviction_b = eviction_b.clone();
                                 Callback::from(move |_| {
                                     cmp_playing.set(false);
                                     let cur = *cmp_cursor;
                                     let tr = &*cmp_trace;
                                     if cur >= tr.len() { return; }
-                                    let mut a = (*engine_a).clone();
-                                    let mut b = (*engine_b).clone();
+                                    let prev_a = (*engine_a).clone();
+                                    let prev_b = (*engine_b).clone();
+                                    let mut a = prev_a.clone();
+                                    let mut b = prev_b.clone();
                                     for instr in &tr[cur..] {
                                         a.execute(instr.op.clone(), instr.addr);
                                         b.execute(instr.op.clone(), instr.addr);
                                     }
+                                    eviction_a.set(detect_eviction(&prev_a, &a));
+                                    eviction_b.set(detect_eviction(&prev_b, &b));
                                     engine_a.set(a);
                                     engine_b.set(b);
                                     cmp_cursor.set(tr.len());
@@ -571,8 +634,12 @@ pub fn app() -> Html {
                                 let cmp_playing = cmp_playing.clone();
                                 let engine_a = engine_a.clone();
                                 let engine_b = engine_b.clone();
+                                let eviction_a = eviction_a.clone();
+                                let eviction_b = eviction_b.clone();
                                 Callback::from(move |_| {
                                     cmp_playing.set(false);
+                                    eviction_a.set(None);
+                                    eviction_b.set(None);
                                     let mut a = (*engine_a).clone();
                                     let mut b = (*engine_b).clone();
                                     a.reset();
@@ -587,19 +654,7 @@ pub fn app() -> Html {
                 } else {
                     html! {
                         <>
-                            <MetricsPanel
-                                stats={engine.stats.clone()}
-                                feedback={engine.feedback.clone()}
-                                logs={engine.logs.clone()}
-                                on_clear_log={{
-                                    let engine = engine.clone();
-                                    Callback::from(move |_| {
-                                        let mut next_eng = (*engine).clone();
-                                        next_eng.logs.clear();
-                                        engine.set(next_eng);
-                                    })
-                                }}
-                            />
+                            <MetricsPanel stats={engine.stats.clone()} />
 
                             <div class="cockpit-grid">
                                 <StepController
@@ -644,20 +699,42 @@ pub fn app() -> Html {
                                     on_config_change={on_config_change}
                                 />
 
-                                <div class="stack-col">
+                                <div class="center-datapath-col">
+                                    <BusDatapath
+                                        engine={(*engine).clone()}
+                                        eviction={(*last_eviction).clone()}
+                                        speed_ms={*speed_ms}
+                                        is_playing={*is_playing}
+                                    />
                                     <AddressDecoder
                                         breakdown={engine.last_breakdown.clone()}
                                         config={engine.config}
+                                        clock={engine.clock}
                                     />
-                                    <CacheGrid engine={(*engine).clone()} />
-                                    <RamView
-                                        ram={engine.ram.clone()}
-                                        selected_addr={*selected_addr}
-                                        last_hit_level={engine.last_hit_level}
-                                        on_select_addr={on_select_addr}
-                                        on_page_fault={on_page_fault}
+                                    <CacheGrid
+                                        engine={(*engine).clone()}
+                                        eviction={(*last_eviction).clone()}
                                     />
                                 </div>
+
+                                <RamView
+                                    ram={engine.ram.clone()}
+                                    selected_addr={*selected_addr}
+                                    last_hit_level={engine.last_hit_level}
+                                    clock={engine.clock}
+                                    feedback={engine.feedback.clone()}
+                                    logs={engine.logs.clone()}
+                                    on_select_addr={on_select_addr}
+                                    on_page_fault={on_page_fault}
+                                    on_clear_log={{
+                                        let engine = engine.clone();
+                                        Callback::from(move |_| {
+                                            let mut next_eng = (*engine).clone();
+                                            next_eng.logs.clear();
+                                            engine.set(next_eng);
+                                        })
+                                    }}
+                                />
                             </div>
                         </>
                     }

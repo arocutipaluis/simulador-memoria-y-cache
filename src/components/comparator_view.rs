@@ -3,16 +3,19 @@ use yew::prelude::*;
 
 use crate::components::icons::{PauseIcon, PlayIcon, ResetIcon, StepIcon};
 use crate::components::step_controller::parse_address_str;
+use crate::components::EvictionNotice;
 use crate::sim::engine::CacheEngine;
 use crate::sim::types::{
-    format_hex, CacheConfig, MappingPolicy, MemInstruction, MemOp, PresetKind, ReplacementPolicy,
-    SlotFlash, WritePolicy,
+    format_hex, BusFlow, CacheConfig, HitLevel, MappingPolicy, MemInstruction, MemOp, PresetKind,
+    ReplacementPolicy, SlotFlash, WritePolicy,
 };
 
 #[derive(Properties, PartialEq)]
 pub struct ComparatorViewProps {
     pub engine_a: CacheEngine,
     pub engine_b: CacheEngine,
+    pub eviction_a: Option<EvictionNotice>,
+    pub eviction_b: Option<EvictionNotice>,
     pub trace: Vec<MemInstruction>,
     pub cursor: usize,
     pub is_playing: bool,
@@ -67,14 +70,17 @@ struct SystemColumnProps {
     pub title: &'static str,
     pub accent_class: &'static str,
     pub engine: CacheEngine,
+    pub eviction: Option<EvictionNotice>,
     pub on_config: Callback<CacheConfig>,
 }
 
 #[function_component(SystemColumn)]
 fn system_column(props: &SystemColumnProps) -> Html {
-    let cfg = props.engine.config;
-    let s = &props.engine.stats;
+    let eng = &props.engine;
+    let cfg = eng.config;
+    let s = &eng.stats;
     let ways = cfg.effective_ways();
+    let clock = eng.clock;
 
     let mapping_val = match cfg.mapping {
         MappingPolicy::DirectMapped => "direct",
@@ -92,20 +98,35 @@ fn system_column(props: &SystemColumnProps) -> Html {
         WritePolicy::WriteBack => "wb",
     };
 
+    let mini_pkt_cls = if clock == 0 {
+        ""
+    } else if eng.last_hit_level == Some(HitLevel::L1) {
+        "mini-pkt-hit"
+    } else if props.eviction.as_ref().map(|e| e.write_back_ram).unwrap_or(false)
+        || eng.bus_flow == BusFlow::WriteBackToRam
+    {
+        "mini-pkt-wb"
+    } else {
+        "mini-pkt-miss"
+    };
+
+    let active_set = eng.last_breakdown.index_val;
+
     html! {
-        <section class="panel">
-            <div class="panel-header">
+        <section class="panel compact-panel cmp-col-panel">
+            <div class="panel-header compact-header">
                 <h3 class="panel-title">{props.title}</h3>
                 <span class={classes!("badge", props.accent_class)}>
-                    {format!("{} | {}x{} ({} B)", cfg.mapping.label(), cfg.num_blocks, cfg.block_size, cfg.capacity_bytes())}
+                    {format!("{} · {}x{} ({}B)", cfg.mapping.label(), cfg.num_blocks, cfg.block_size, cfg.capacity_bytes())}
                 </span>
             </div>
 
-            <div style="display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap:0.45rem; margin-bottom:0.7rem;">
+            // Configuracion inline 4 columnas
+            <div class="cmp-selects-4">
                 <div class="field-group">
                     <label class="field-label">{"Mapeo"}</label>
                     <select
-                        class="select"
+                        class="select select-sm"
                         onchange={
                             let cb = props.on_config.clone();
                             Callback::from(move |e: Event| {
@@ -121,17 +142,17 @@ fn system_column(props: &SystemColumnProps) -> Html {
                             })
                         }
                     >
-                        <option value="direct" selected={mapping_val == "direct"}>{"Mapeo Directo"}</option>
-                        <option value="set2" selected={mapping_val == "set2"}>{"Asociativo 2 vias"}</option>
-                        <option value="set4" selected={mapping_val == "set4"}>{"Asociativo 4 vias"}</option>
-                        <option value="full" selected={mapping_val == "full"}>{"Totalmente Asociativo"}</option>
+                        <option value="direct" selected={mapping_val == "direct"}>{"Directo"}</option>
+                        <option value="set2" selected={mapping_val == "set2"}>{"2-Way"}</option>
+                        <option value="set4" selected={mapping_val == "set4"}>{"4-Way"}</option>
+                        <option value="full" selected={mapping_val == "full"}>{"Full"}</option>
                     </select>
                 </div>
 
                 <div class="field-group">
-                    <label class="field-label">{"Bloques x Palabras"}</label>
+                    <label class="field-label">{"Geometria"}</label>
                     <select
-                        class="select"
+                        class="select select-sm"
                         onchange={
                             let cb = props.on_config.clone();
                             Callback::from(move |e: Event| {
@@ -147,17 +168,17 @@ fn system_column(props: &SystemColumnProps) -> Html {
                             })
                         }
                     >
-                        <option value="4x2" selected={cfg.num_blocks == 4 && cfg.block_size == 2}>{"4 Blq x 2 Pal (32 B)"}</option>
-                        <option value="8x1" selected={cfg.num_blocks == 8 && cfg.block_size == 1}>{"8 Blq x 1 Pal (32 B)"}</option>
-                        <option value="8x2" selected={cfg.num_blocks == 8 && cfg.block_size == 2}>{"8 Blq x 2 Pal (64 B)"}</option>
-                        <option value="8x4" selected={cfg.num_blocks == 8 && cfg.block_size == 4}>{"8 Blq x 4 Pal (128 B)"}</option>
+                        <option value="4x2" selected={cfg.num_blocks == 4 && cfg.block_size == 2}>{"4x2 (32B)"}</option>
+                        <option value="8x1" selected={cfg.num_blocks == 8 && cfg.block_size == 1}>{"8x1 (32B)"}</option>
+                        <option value="8x2" selected={cfg.num_blocks == 8 && cfg.block_size == 2}>{"8x2 (64B)"}</option>
+                        <option value="8x4" selected={cfg.num_blocks == 8 && cfg.block_size == 4}>{"8x4 (128B)"}</option>
                     </select>
                 </div>
 
                 <div class="field-group">
                     <label class="field-label">{"Reemplazo"}</label>
                     <select
-                        class="select"
+                        class="select select-sm"
                         disabled={matches!(cfg.mapping, MappingPolicy::DirectMapped)}
                         onchange={
                             let cb = props.on_config.clone();
@@ -182,7 +203,7 @@ fn system_column(props: &SystemColumnProps) -> Html {
                 <div class="field-group">
                     <label class="field-label">{"Escritura"}</label>
                     <select
-                        class="select"
+                        class="select select-sm"
                         onchange={
                             let cb = props.on_config.clone();
                             Callback::from(move |e: Event| {
@@ -198,46 +219,77 @@ fn system_column(props: &SystemColumnProps) -> Html {
                         }
                     >
                         <option value="wb" selected={wp_val == "wb"}>{"Write-Back"}</option>
-                        <option value="wt" selected={wp_val == "wt"}>{"Write-Through"}</option>
+                        <option value="wt" selected={wp_val == "wt"}>{"Write-Thru"}</option>
                     </select>
                 </div>
             </div>
 
-            // Metricas compactas por sistema
-            <div style="display:grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap:0.4rem; margin-bottom:0.7rem;">
-                <div class="metric-card hit" style="padding:0.45rem;">
-                    <div class="metric-label">{"Hit Rate"}</div>
-                    <div class="metric-val" style="font-size:1rem; color:var(--accent-emerald);">{format!("{:.1}%", s.hit_rate())}</div>
+            // Mini Bus SVG animado por columna (CPU -> L1 [Set] -> DRAM)
+            <div class="mini-svg-bus">
+                <svg viewBox="0 0 380 34" preserveAspectRatio="xMidYMid meet" aria-hidden="true">
+                    <path class="bus-base" d="M 62 17 L 138 17 M 242 17 L 318 17" />
+                    <rect x="6" y="4" width="56" height="26" rx="5" class="mini-node" />
+                    <text x="34" y="20" text-anchor="middle" class="mini-node-txt mono">
+                        {if clock == 0 { "CPU".to_string() } else { format_hex(eng.reg_mar) }}
+                    </text>
+
+                    <rect x="138" y="4" width="104" height="26" rx="5" class={if clock == 0 { "mini-node" } else if eng.last_hit_level == Some(HitLevel::L1) { "mini-node hit" } else { "mini-node miss" }} />
+                    <text x="190" y="20" text-anchor="middle" class="mini-node-txt mono">
+                        {format!("L1 S{} {}", active_set, if clock == 0 { "" } else if eng.last_hit_level == Some(HitLevel::L1) { "HIT" } else { "MISS" })}
+                    </text>
+
+                    <rect x="318" y="4" width="56" height="26" rx="5" class={if clock > 0 && eng.last_hit_level != Some(HitLevel::L1) { "mini-node miss" } else { "mini-node" }} />
+                    <text x="346" y="20" text-anchor="middle" class="mini-node-txt mono">{"DRAM"}</text>
+
+                    { if clock > 0 {
+                        html! {
+                            <g key={format!("mpkt-{}", clock)} class={classes!("mini-pkt", mini_pkt_cls)}>
+                                <circle cx="0" cy="0" r="5" />
+                            </g>
+                        }
+                    } else {
+                        html! {}
+                    }}
+                </svg>
+            </div>
+
+            // 4 KPIs compactos
+            <div class="cmp-kpi-4">
+                <div class="kpi-tile hit">
+                    <span class="kpi-label">{"Hit Rate"}</span>
+                    <span class="kpi-val mono text-emerald">{format!("{:.1}%", s.hit_rate())}</span>
                 </div>
-                <div class="metric-card miss" style="padding:0.45rem;">
-                    <div class="metric-label">{"Miss Rate"}</div>
-                    <div class="metric-val" style="font-size:1rem; color:var(--accent-rose);">{format!("{:.1}%", s.miss_rate())}</div>
+                <div class="kpi-tile miss">
+                    <span class="kpi-label">{"Miss Rate"}</span>
+                    <span class="kpi-val mono text-rose">{format!("{:.1}%", s.miss_rate())}</span>
                 </div>
-                <div class="metric-card amat" style="padding:0.45rem;">
-                    <div class="metric-label">{"AMAT"}</div>
-                    <div class="metric-val" style="font-size:1rem; color:var(--accent-cyan);">{format!("{:.1} ns", s.amat_ns())}</div>
+                <div class="kpi-tile">
+                    <span class="kpi-label">{"AMAT"}</span>
+                    <span class="kpi-val mono text-cyan">{format!("{:.1} ns", s.amat_ns())}</span>
                 </div>
-                <div class="metric-card wb" style="padding:0.45rem;">
-                    <div class="metric-label">{"Conf / WB"}</div>
-                    <div class="metric-val" style="font-size:1rem; color:var(--accent-amber);">{format!("{}/{}", s.conflict_misses, s.write_backs)}</div>
+                <div class="kpi-tile wb">
+                    <span class="kpi-label">{"Conf / WB"}</span>
+                    <span class="kpi-val mono text-amber">{format!("{}/{}", s.conflict_misses, s.write_backs)}</span>
                 </div>
             </div>
 
-            // Estado visual de L1 en este sistema
-            <div class="sets-list">
-                { for props.engine.sets.iter().enumerate().map(|(set_idx, set_slots)| {
+            // Sets L1 compactos
+            <div class="sets-list cmp-sets-scroll">
+                { for eng.sets.iter().enumerate().map(|(set_idx, set_slots)| {
+                    let is_active = eng.stats.accesses > 0 && set_idx == active_set;
                     let cols_style = format!("grid-template-columns: repeat({}, minmax(0, 1fr));", ways.min(4));
                     html! {
-                        <div class="set-row">
+                        <div class={classes!("set-row", is_active.then_some("set-active"))}>
                             <div class="set-label">
                                 <span>{format!("S{}", set_idx)}</span>
                             </div>
                             <div class="ways-grid" style={cols_style}>
                                 { for set_slots.iter().enumerate().map(|(w_idx, opt_line)| {
+                                    let evicted_here = props.eviction.as_ref().filter(|e| e.set_idx == set_idx && e.way_idx == w_idx);
                                     match opt_line {
                                         None => html! {
-                                            <div class="way-slot empty" style="min-height:38px;">
-                                                <span class="mono" style="font-size:0.65rem; color:var(--text-muted);">{format!("V{}: -", w_idx)}</span>
+                                            <div class={classes!("way-slot", "empty", (ways == 1).then_some("single-way"))}>
+                                                <span class="mono slot-empty-txt">{format!("V{}: -", w_idx)}</span>
                                             </div>
                                         },
                                         Some(line) => {
@@ -247,17 +299,25 @@ fn system_column(props: &SystemColumnProps) -> Html {
                                                 Some(SlotFlash::WriteBack) => Some("flash-wb"),
                                                 None => None,
                                             };
+                                            let slot_key = format!("cmp-s{}-w{}-c{}", set_idx, w_idx, if line.flash.is_some() { clock } else { 0 });
                                             html! {
-                                                <div class={classes!("way-slot", flash_cls)} style="padding:0.32rem 0.45rem;">
+                                                <div key={slot_key} class={classes!("way-slot", "single-way", flash_cls)}>
                                                     <div class="way-meta">
-                                                        <span style="color:var(--accent-indigo); font-weight:700;">{format!("B#{} (T:0x{:X})", line.block_addr, line.tag)}</span>
-                                                        { if line.dirty {
-                                                            html! { <span class="flag-pill flag-d-on">{"D"}</span> }
-                                                        } else {
-                                                            html! {}
-                                                        }}
+                                                        <span class="blk-chip mono">{format!("B#{} T:{:X}", line.block_addr, line.tag)}</span>
+                                                        <div class="way-right-meta">
+                                                            { if let Some(ev) = evicted_here {
+                                                                html! {
+                                                                    <span class={classes!("evict-eject-pill", if ev.write_back_ram { "wb" } else { "ev" })}>
+                                                                        {format!("OUT B#{}", ev.old_block)}
+                                                                    </span>
+                                                                }
+                                                            } else { html! {} }}
+                                                            { if line.dirty {
+                                                                html! { <span class="flag-pill flag-d-on">{"D"}</span> }
+                                                            } else { html! {} }}
+                                                        </div>
                                                     </div>
-                                                    <div class="mono" style="font-size:0.64rem; color:var(--text-secondary);">
+                                                    <div class="mono muted-xs">
                                                         {format!("{}..{}", format_hex(line.words.first().map(|x| x.0).unwrap_or(0)), format_hex(line.words.last().map(|x| x.0).unwrap_or(0)))}
                                                     </div>
                                                 </div>
@@ -281,134 +341,126 @@ pub fn comparator_view(props: &ComparatorViewProps) -> Html {
     let has_pending = props.cursor < props.trace.len();
 
     let presets = [
-        PresetKind::Thrashing,
-        PresetKind::Sequential,
-        PresetKind::Stride4,
-        PresetKind::Spatial,
-        PresetKind::Temporal,
-        PresetKind::WriteHeavy,
+        (PresetKind::Thrashing, "Thrashing"),
+        (PresetKind::Sequential, "Secuencial"),
+        (PresetKind::Stride4, "Stride = 4"),
+        (PresetKind::Spatial, "Espacial"),
+        (PresetKind::Temporal, "Temporal"),
+        (PresetKind::WriteHeavy, "WB vs WT"),
     ];
 
     let hit_diff = sb.hit_rate() - sa.hit_rate();
     let amat_diff = sa.amat_ns() - sb.amat_ns();
 
     let winner_banner = if sa.accesses == 0 {
-        "Ejecuta la secuencia compartida para comparar Sistema A vs Sistema B en tiempo real.".to_string()
+        "Presiona Step o Auto para comparar Sistema A vs Sistema B".to_string()
     } else if hit_diff.abs() < 0.05 && amat_diff.abs() < 0.05 {
-        "Empate tecnico en Hit Rate y AMAT con esta secuencia.".to_string()
+        "Empate tecnico en Hit Rate y AMAT".to_string()
     } else if hit_diff > 0.0 || amat_diff > 0.0 {
-        format!(
-            "Sistema B lidera: {:+.1} pts en Hit Rate | {:.1} ns menos de AMAT.",
-            hit_diff, amat_diff
-        )
+        format!("Sistema B lidera: {:+.1}% Hit | -{:.1} ns AMAT", hit_diff, amat_diff)
     } else {
-        format!(
-            "Sistema A lidera: {:+.1} pts en Hit Rate | {:.1} ns menos de AMAT.",
-            -hit_diff, -amat_diff
-        )
+        format!("Sistema A lidera: {:+.1}% Hit | -{:.1} ns AMAT", -hit_diff, -amat_diff)
     };
 
     let max_amat = sa.amat_ns().max(sb.amat_ns()).max(1.0);
+    let scale_hit_a = (sa.hit_rate() / 100.0).clamp(0.0, 1.0);
+    let scale_hit_b = (sb.hit_rate() / 100.0).clamp(0.0, 1.0);
+    let scale_amat_a = (sa.amat_ns() / max_amat).clamp(0.0, 1.0);
+    let scale_amat_b = (sb.amat_ns() / max_amat).clamp(0.0, 1.0);
 
     html! {
-        <div class="stack-col">
-            // Barra de control compartida de la traza A/B
-            <section class="panel">
-                <div class="panel-header">
-                    <h2 class="panel-title">{"Traza Compartida (Ejecucion Sincronizada A/B)"}</h2>
-                    <span class="badge badge-cyan">{format!("Paso {}/{}", props.cursor, props.trace.len())}</span>
-                </div>
+        <div class="comparator-shell">
+            // Top Controls + Shared Trace
+            <section class="panel compact-panel cmp-top-panel">
+                <div class="cmp-controls-bar">
+                    <div class="cmp-presets-row">
+                        { for presets.into_iter().map(|(p, label)| {
+                            let cb = props.on_load_preset.clone();
+                            html! {
+                                <button class="btn btn-xs" type="button" onclick={Callback::from(move |_| cb.emit(p))}>
+                                    {label}
+                                </button>
+                            }
+                        }) }
+                    </div>
 
-                <div style="display:flex; flex-wrap:wrap; gap:0.4rem; margin-bottom:0.6rem;">
-                    { for presets.into_iter().map(|p| {
-                        let cb = props.on_load_preset.clone();
-                        html! {
-                            <button class="btn btn-sm" type="button" onclick={Callback::from(move |_| cb.emit(p))}>
-                                {p.label()}
-                            </button>
-                        }
-                    }) }
-                </div>
-
-                <div style="display:flex; flex-wrap:wrap; gap:0.5rem; margin-bottom:0.6rem;">
-                    <input
-                        class="input"
-                        style="flex:1 1 280px;"
-                        type="text"
-                        placeholder="Ej: 0x00, 0x20, 0x01, 0x21, W:0x02=X9"
-                        value={props.custom_trace_input.clone()}
-                        oninput={
-                            let cb = props.on_custom_trace_input.clone();
-                            Callback::from(move |e: InputEvent| {
-                                let inp: HtmlInputElement = e.target_unchecked_into();
-                                cb.emit(inp.value());
-                            })
-                        }
-                    />
-                    <button
-                        class="btn btn-sm"
-                        type="button"
-                        onclick={
-                            let cb = props.on_apply_custom_trace.clone();
-                            Callback::from(move |_| cb.emit(()))
-                        }
-                    >
-                        {"Cargar Traza Manual"}
-                    </button>
-                    <button
-                        class="btn btn-sm btn-cyan"
-                        type="button"
-                        disabled={!has_pending || props.is_playing}
-                        onclick={
-                            let cb = props.on_step.clone();
-                            Callback::from(move |_| cb.emit(()))
-                        }
-                    >
-                        <StepIcon />
-                        <span>{"Step A/B"}</span>
-                    </button>
-                    <button
-                        class={classes!("btn", "btn-sm", if props.is_playing { "btn-amber" } else { "btn-emerald" })}
-                        type="button"
-                        disabled={!has_pending && !props.is_playing}
-                        onclick={
-                            let cb = props.on_toggle_play.clone();
-                            Callback::from(move |_| cb.emit(()))
-                        }
-                    >
-                        {if props.is_playing { html! { <><PauseIcon /><span>{"Pausa"}</span></> } } else { html! { <><PlayIcon /><span>{"Auto"}</span></> } }}
-                    </button>
-                    <button
-                        class="btn btn-sm btn-indigo"
-                        type="button"
-                        disabled={!has_pending}
-                        onclick={
-                            let cb = props.on_run_all.clone();
-                            Callback::from(move |_| cb.emit(()))
-                        }
-                    >
-                        {"Ejecutar Todo"}
-                    </button>
-                    <button
-                        class="btn btn-sm btn-rose"
-                        type="button"
-                        onclick={
-                            let cb = props.on_reset.clone();
-                            Callback::from(move |_| cb.emit(()))
-                        }
-                    >
-                        <ResetIcon />
-                        <span>{"Reset"}</span>
-                    </button>
+                    <div class="cmp-transport-row">
+                        <input
+                            class="input input-sm cmp-trace-input"
+                            type="text"
+                            placeholder="0x00, 0x20, W:0x02=X9"
+                            value={props.custom_trace_input.clone()}
+                            oninput={
+                                let cb = props.on_custom_trace_input.clone();
+                                Callback::from(move |e: InputEvent| {
+                                    let inp: HtmlInputElement = e.target_unchecked_into();
+                                    cb.emit(inp.value());
+                                })
+                            }
+                        />
+                        <button
+                            class="btn btn-xs"
+                            type="button"
+                            onclick={
+                                let cb = props.on_apply_custom_trace.clone();
+                                Callback::from(move |_| cb.emit(()))
+                            }
+                        >
+                            {"Aplicar"}
+                        </button>
+                        <button
+                            class="btn btn-xs btn-cyan"
+                            type="button"
+                            disabled={!has_pending || props.is_playing}
+                            onclick={
+                                let cb = props.on_step.clone();
+                                Callback::from(move |_| cb.emit(()))
+                            }
+                        >
+                            <StepIcon />
+                            <span>{"Step"}</span>
+                        </button>
+                        <button
+                            class={classes!("btn", "btn-xs", if props.is_playing { "btn-amber" } else { "btn-emerald" })}
+                            type="button"
+                            disabled={!has_pending && !props.is_playing}
+                            onclick={
+                                let cb = props.on_toggle_play.clone();
+                                Callback::from(move |_| cb.emit(()))
+                            }
+                        >
+                            {if props.is_playing { html! { <><PauseIcon /><span>{"Pausa"}</span></> } } else { html! { <><PlayIcon /><span>{"Play"}</span></> } }}
+                        </button>
+                        <button
+                            class="btn btn-xs btn-indigo"
+                            type="button"
+                            disabled={!has_pending}
+                            onclick={
+                                let cb = props.on_run_all.clone();
+                                Callback::from(move |_| cb.emit(()))
+                            }
+                        >
+                            {"Todo"}
+                        </button>
+                        <button
+                            class="btn btn-xs btn-rose"
+                            type="button"
+                            onclick={
+                                let cb = props.on_reset.clone();
+                                Callback::from(move |_| cb.emit(()))
+                            }
+                        >
+                            <ResetIcon />
+                        </button>
+                        <span class="badge mono">{format!("{}/{}", props.cursor, props.trace.len())}</span>
+                    </div>
                 </div>
 
                 { if let Some(err) = &props.trace_error {
-                    html! { <div style="font-size:0.74rem; color:var(--accent-rose); margin-bottom:0.45rem;">{err}</div> }
-                } else {
-                    html! {}
-                }}
+                    html! { <div class="error-text">{err}</div> }
+                } else { html! {} }}
 
-                <div class="queue-strip">
+                <div class="queue-strip cmp-queue-line">
                     { for props.trace.iter().enumerate().map(|(idx, instr)| {
                         let is_done = idx < props.cursor;
                         let is_curr = idx == props.cursor;
@@ -425,54 +477,56 @@ pub fn comparator_view(props: &ComparatorViewProps) -> Html {
                 </div>
             </section>
 
-            // Comparativa visual de barras Hit Rate y AMAT
-            <section class="panel">
-                <div class="panel-header">
-                    <h2 class="panel-title">{"Resultado Comparativo en Vivo"}</h2>
+            // Live Scoreboard Strip (GPU scaleX transform)
+            <section class="panel compact-panel cmp-bars-panel">
+                <div class="cmp-bars-header">
+                    <h2 class="panel-title">{"Comparativa en Vivo"}</h2>
                     <span class="badge badge-emerald">{winner_banner}</span>
                 </div>
 
                 <div class="delta-bars">
-                    <div>
-                        <div class="mono" style="font-size:0.74rem; display:flex; justify-content:space-between;">
-                            <span>{"Hit Rate Sistema A vs B"}</span>
+                    <div class="bar-pair">
+                        <div class="mono bar-meta">
+                            <span>{"Hit Rate (A vs B)"}</span>
                             <span>{format!("{:.1}% vs {:.1}%", sa.hit_rate(), sb.hit_rate())}</span>
                         </div>
                         <div class="bar-track">
-                            <div class="bar-fill" style={format!("width:{:.1}%; background:var(--accent-amber);", sa.hit_rate())}></div>
+                            <div class="bar-fill fill-amber" style={format!("transform: scaleX({:.4});", scale_hit_a)}></div>
                         </div>
                         <div class="bar-track">
-                            <div class="bar-fill" style={format!("width:{:.1}%; background:var(--accent-emerald);", sb.hit_rate())}></div>
+                            <div class="bar-fill fill-emerald" style={format!("transform: scaleX({:.4});", scale_hit_b)}></div>
                         </div>
                     </div>
 
-                    <div>
-                        <div class="mono" style="font-size:0.74rem; display:flex; justify-content:space-between;">
-                            <span>{"AMAT Sistema A vs B (menor es mejor)"}</span>
+                    <div class="bar-pair">
+                        <div class="mono bar-meta">
+                            <span>{"AMAT (menor = mejor)"}</span>
                             <span>{format!("{:.1} ns vs {:.1} ns", sa.amat_ns(), sb.amat_ns())}</span>
                         </div>
                         <div class="bar-track">
-                            <div class="bar-fill" style={format!("width:{:.1}%; background:var(--accent-rose);", (sa.amat_ns() / max_amat) * 100.0)}></div>
+                            <div class="bar-fill fill-rose" style={format!("transform: scaleX({:.4});", scale_amat_a)}></div>
                         </div>
                         <div class="bar-track">
-                            <div class="bar-fill" style={format!("width:{:.1}%; background:var(--accent-cyan);", (sb.amat_ns() / max_amat) * 100.0)}></div>
+                            <div class="bar-fill fill-cyan" style={format!("transform: scaleX({:.4});", scale_amat_b)}></div>
                         </div>
                     </div>
                 </div>
             </section>
 
-            // Dos sistemas lado a lado
+            // Split System A vs System B
             <div class="compare-grid">
                 <SystemColumn
                     title="Sistema A"
                     accent_class="badge-amber"
                     engine={props.engine_a.clone()}
+                    eviction={props.eviction_a.clone()}
                     on_config={props.on_config_a.clone()}
                 />
                 <SystemColumn
                     title="Sistema B"
                     accent_class="badge-emerald"
                     engine={props.engine_b.clone()}
+                    eviction={props.eviction_b.clone()}
                     on_config={props.on_config_b.clone()}
                 />
             </div>

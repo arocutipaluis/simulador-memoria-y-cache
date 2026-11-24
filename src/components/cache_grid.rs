@@ -1,11 +1,13 @@
 use yew::prelude::*;
 
+use crate::components::EvictionNotice;
 use crate::sim::engine::CacheEngine;
-use crate::sim::types::{format_hex, BusFlow, HitLevel, SlotFlash};
+use crate::sim::types::{format_hex, HitLevel, SlotFlash};
 
 #[derive(Properties, PartialEq)]
 pub struct CacheGridProps {
     pub engine: CacheEngine,
+    pub eviction: Option<EvictionNotice>,
 }
 
 #[function_component(CacheGrid)]
@@ -14,58 +16,17 @@ pub fn cache_grid(props: &CacheGridProps) -> Html {
     let cfg = &eng.config;
     let active_set = eng.last_breakdown.index_val;
     let ways = cfg.effective_ways();
-
-    let (bus_class, bus_label) = match eng.bus_flow {
-        BusFlow::Idle => ("", "BUS INACTIVO"),
-        BusFlow::DownToRam => ("active-down", "BUS: MISS -> CONSULTANDO RAM"),
-        BusFlow::UpHit => ("active-up", "BUS: HIT -> RETORNANDO DATO A CPU"),
-        BusFlow::WriteBackToRam => ("active-wb", "BUS: ESCRITURA / WRITE-BACK A RAM"),
-        BusFlow::PageFaultDisk => ("active-wb", "BUS: CARGANDO PAGINA DESDE SSD"),
-    };
+    let clock = eng.clock;
 
     html! {
-        <div class="stack-col">
-            // NIVEL 0: REGISTROS CPU
-            <section class="panel">
-                <div class="panel-header">
-                    <h2 class="panel-title">{"Nivel 0 • Registros CPU"}</h2>
-                    <span class="badge badge-emerald">{"0.5 ns • 128 B"}</span>
-                </div>
-                <div class="reg-grid">
-                    <div class="reg-cell">
-                        <span class="reg-name">{"RAX"}</span>
-                        <span class="reg-val">{&eng.reg_rax}</span>
-                    </div>
-                    <div class="reg-cell">
-                        <span class="reg-name">{"MAR"}</span>
-                        <span class="reg-val" style="color:var(--accent-cyan);">{format_hex(eng.reg_mar)}</span>
-                    </div>
-                    <div class="reg-cell">
-                        <span class="reg-name">{"MDR"}</span>
-                        <span class="reg-val" style="color:var(--accent-amber);">{&eng.reg_mdr}</span>
-                    </div>
-                    <div class="reg-cell">
-                        <span class="reg-name">{"ESTADO"}</span>
-                        <span class="reg-val" style="font-size:0.68rem;">{&eng.reg_status}</span>
-                    </div>
-                </div>
-            </section>
-
-            // BUS CPU <-> L1
-            <div class="bus-bridge">
-                <div class={classes!("bus-track", bus_class)}></div>
-                <span class="badge">{bus_label}</span>
-                <div class={classes!("bus-track", bus_class)}></div>
-            </div>
-
-            // NIVEL 1: CACHE L1 CONFIGURABLE (CONJUNTOS x VIAS)
-            <section class="panel">
-                <div class="panel-header">
+        <div class="cache-hierarchy-col">
+            <section class="panel l1-panel" aria-label="Nivel 1 Cache L1">
+                <div class="panel-header compact-header">
                     <h2 class="panel-title">
-                        {format!("Nivel 1 • Cache L1 ({})", cfg.mapping.label())}
+                        {format!("Nivel 1 · Cache L1 ({})", cfg.mapping.label())}
                     </h2>
                     <span class="badge badge-cyan">
-                        {format!("1.0 ns • {} pal ({} B)", cfg.capacity_words(), cfg.capacity_bytes())}
+                        {format!("1.0 ns · {} pal ({} B)", cfg.capacity_words(), cfg.capacity_bytes())}
                     </span>
                 </div>
 
@@ -76,16 +37,19 @@ pub fn cache_grid(props: &CacheGridProps) -> Html {
                         html! {
                             <div class={classes!("set-row", is_target_set.then_some("set-active"))}>
                                 <div class="set-label">
-                                    <span>{format!("SET {}", set_idx)}</span>
-                                    <span style="font-size:0.62rem; color:var(--text-muted);">{format!("{} via(s)", ways)}</span>
+                                    <span>{format!("S{}", set_idx)}</span>
+                                    { if ways > 1 {
+                                        html! { <span class="set-ways-hint">{format!("{}W", ways)}</span> }
+                                    } else { html! {} }}
                                 </div>
                                 <div class="ways-grid" style={cols_style}>
                                     { for set_slots.iter().enumerate().map(|(way_idx, opt_line)| {
+                                        let evicted_here = props.eviction.as_ref().filter(|e| e.set_idx == set_idx && e.way_idx == way_idx);
                                         match opt_line {
                                             None => html! {
-                                                <div class="way-slot empty">
-                                                    <span class="mono" style="font-size:0.68rem; color:var(--text-muted);">
-                                                        {format!("Via {} • V=0 (Vacia)", way_idx)}
+                                                <div class={classes!("way-slot", "empty", (ways == 1).then_some("single-way"))}>
+                                                    <span class="mono slot-empty-txt">
+                                                        {format!("V{} · V=0", way_idx)}
                                                     </span>
                                                 </div>
                                             },
@@ -96,21 +60,38 @@ pub fn cache_grid(props: &CacheGridProps) -> Html {
                                                     Some(SlotFlash::WriteBack) => Some("flash-wb"),
                                                     None => None,
                                                 };
+                                                let slot_key = format!("slot-{}-{}-c{}", set_idx, way_idx, if line.flash.is_some() { clock } else { 0 });
                                                 html! {
-                                                    <div class={classes!("way-slot", flash_cls)}>
+                                                    <div key={slot_key} class={classes!("way-slot", (ways == 1).then_some("single-way"), flash_cls)}>
                                                         <div class="way-meta">
-                                                            <div style="display:flex; gap:0.25rem; align-items:center;">
+                                                            <div class="way-flags">
                                                                 <span class="flag-pill flag-v">{"V:1"}</span>
                                                                 <span class={classes!("flag-pill", if line.dirty { "flag-d-on" } else { "flag-d-off" })}>
                                                                     {if line.dirty { "D:1" } else { "D:0" }}
                                                                 </span>
-                                                                <span style="color:var(--accent-indigo); font-weight:700;">
-                                                                    {format!("Tag 0x{:X}", line.tag)}
+                                                                <span class="tag-chip mono">
+                                                                    {format!("T:0x{:X}", line.tag)}
+                                                                </span>
+                                                                <span class="blk-chip mono">
+                                                                    {format!("B#{}", line.block_addr)}
                                                                 </span>
                                                             </div>
-                                                            <span style="color:var(--text-muted);">
-                                                                {format!("Blq #{} • t{}", line.block_addr, line.last_used)}
-                                                            </span>
+                                                            <div class="way-right-meta">
+                                                                { if let Some(ev) = evicted_here {
+                                                                    html! {
+                                                                        <span class={classes!("evict-eject-pill", if ev.write_back_ram { "wb" } else { "ev" })}>
+                                                                            { if ev.write_back_ram {
+                                                                                format!("WB B#{}", ev.old_block)
+                                                                            } else {
+                                                                                format!("OUT B#{}", ev.old_block)
+                                                                            }}
+                                                                        </span>
+                                                                    }
+                                                                } else {
+                                                                    html! {}
+                                                                }}
+                                                                <span class="lru-tick mono">{format!("t{}", line.last_used)}</span>
+                                                            </div>
                                                         </div>
                                                         <div class="words-row">
                                                             { for line.words.iter().map(|(wa, wv)| {
@@ -134,25 +115,25 @@ pub fn cache_grid(props: &CacheGridProps) -> Html {
                 </div>
             </section>
 
-            // NIVELES 2 Y 3
+            // Nivel 2 y 3 en barra compacta horizontal
             { if eng.config.use_l2_l3 {
                 html! {
                     <div class="l2-l3-grid">
-                        <section class="panel">
-                            <div class="panel-header">
-                                <h2 class="panel-title">{"Nivel 2 • Cache L2"}</h2>
+                        <section class="panel compact-panel l23-panel">
+                            <div class="panel-header compact-header">
+                                <h2 class="panel-title">{"L2 (4 ns)"}</h2>
                                 <span class={classes!("badge", (eng.last_hit_level == Some(HitLevel::L2)).then_some("badge-emerald"))}>
-                                    {"4.0 ns • 12 Blq"}
+                                    {format!("{}/12 Blq", eng.l2.len())}
                                 </span>
                             </div>
                             <div class="mini-cache-list">
                                 { if eng.l2.is_empty() {
-                                    html! { <span class="mono" style="font-size:0.7rem; color:var(--text-muted);">{"Sin bloques cargados"}</span> }
+                                    html! { <span class="mono muted-xs">{"Vacia"}</span> }
                                 } else {
                                     html! { for eng.l2.iter().map(|blk| {
                                         html! {
                                             <span class={classes!("mini-block", blk.last_hit.then_some("hit"))}>
-                                                {format!("B#{} ({})", blk.block_addr, format_hex(blk.words.first().map(|w| w.0).unwrap_or(0)))}
+                                                {format!("B#{}", blk.block_addr)}
                                             </span>
                                         }
                                     }) }
@@ -160,21 +141,21 @@ pub fn cache_grid(props: &CacheGridProps) -> Html {
                             </div>
                         </section>
 
-                        <section class="panel">
-                            <div class="panel-header">
-                                <h2 class="panel-title">{"Nivel 3 • Cache L3"}</h2>
+                        <section class="panel compact-panel l23-panel">
+                            <div class="panel-header compact-header">
+                                <h2 class="panel-title">{"L3 (12 ns)"}</h2>
                                 <span class={classes!("badge", (eng.last_hit_level == Some(HitLevel::L3)).then_some("badge-emerald"))}>
-                                    {"12.0 ns • 16 Blq"}
+                                    {format!("{}/16 Blq", eng.l3.len())}
                                 </span>
                             </div>
                             <div class="mini-cache-list">
                                 { if eng.l3.is_empty() {
-                                    html! { <span class="mono" style="font-size:0.7rem; color:var(--text-muted);">{"Sin bloques cargados"}</span> }
+                                    html! { <span class="mono muted-xs">{"Vacia"}</span> }
                                 } else {
                                     html! { for eng.l3.iter().map(|blk| {
                                         html! {
                                             <span class={classes!("mini-block", blk.last_hit.then_some("hit"))}>
-                                                {format!("B#{} ({})", blk.block_addr, format_hex(blk.words.first().map(|w| w.0).unwrap_or(0)))}
+                                                {format!("B#{}", blk.block_addr)}
                                             </span>
                                         }
                                     }) }
@@ -185,10 +166,10 @@ pub fn cache_grid(props: &CacheGridProps) -> Html {
                 }
             } else {
                 html! {
-                    <section class="panel">
-                        <div class="panel-header" style="margin-bottom:0; padding-bottom:0; border-bottom:none;">
-                            <h2 class="panel-title">{"Niveles 2 y 3 (L2 / L3) Desactivados"}</h2>
-                            <span class="badge">{"Modo estricto L1 -> RAM (como MARS)"}</span>
+                    <section class="panel compact-panel">
+                        <div class="panel-header compact-header" style="margin-bottom:0; padding-bottom:0; border-bottom:none;">
+                            <h2 class="panel-title">{"Niveles L2 / L3 en Bypass"}</h2>
+                            <span class="badge">{"Modo directo L1 -> DRAM"}</span>
                         </div>
                     </section>
                 }
